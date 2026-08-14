@@ -1,0 +1,173 @@
+﻿Shader "Custom/CustomCell"
+{
+    Properties
+    {
+        [Toggle(DEBRIS)] _Debris ("Debris", Int) = 0
+        _CutoutEdgeWidth("Cutout Edge Width", Range(0,0.1)) = 0.02
+
+        [Header(Cel Shading)]
+        _CelSteps ("Cel Shading Steps", Range(1,8)) = 3
+        _CelSmoothness ("Cel Band Smoothness", Range(0.001,0.5)) = 0.05
+        _AmbientStrength ("Ambient Strength", Range(0,1)) = 0.25
+        _RimPower ("Rim Power", Range(0.1,8)) = 3
+        _RimStrength ("Rim Strength", Range(0,1)) = 0.15
+
+        /*
+        These are fed in by Vivify per note.
+        In fact, Vivify will attempt to feed these values into every child of a note prefab.
+        */
+        _Colorrr ("Note Color", Color) = (1,1,1)
+        _Cutttout ("Cutout", Range(0,1)) = 1
+        _CutPlane ("Cut Plane", Vector) = (0, 0, 1, 0)
+    }
+    SubShader
+    {
+        Tags { "RenderType"="Opaque" "LightMode"="ForwardBase" }
+
+        /*
+        The model you're using should have 2-sided normals in order to get a hollow note inside.
+        Blender typically exports like this.
+        */
+        Cull Off
+
+        Pass
+        {
+            Tags { "LightMode"="ForwardBase" }
+
+            CGPROGRAM
+            #pragma vertex vert
+            #pragma fragment frag
+            #pragma multi_compile_instancing // Insert for GPU instancing
+            // Ensure to check "Enable GPU Instancing" on the material
+            #pragma shader_feature DEBRIS
+            #pragma multi_compile_fwdbase // pulls in world-space light/shadow data
+
+            #include "UnityCG.cginc"
+            #include "Lighting.cginc"
+            #include "Assets/VivifyTemplate/Utilities/Shader Functions/Noise.cginc"
+
+            struct appdata
+            {
+                float4 vertex : POSITION;
+                float3 normal : NORMAL;
+                UNITY_VERTEX_INPUT_INSTANCE_ID
+            };
+
+            struct v2f
+            {
+                float4 vertex : SV_POSITION;
+                float3 localPos : TEXCOORD0;
+                float3 worldNormal : TEXCOORD1;
+                UNITY_VERTEX_INPUT_INSTANCE_ID // Insert for GPU instancing
+                UNITY_VERTEX_OUTPUT_STEREO
+            };
+
+            // Register GPU instanced properties (apply per-note)
+            UNITY_INSTANCING_BUFFER_START(Props)
+            UNITY_DEFINE_INSTANCED_PROP(float3, _Colorrr)
+            UNITY_DEFINE_INSTANCED_PROP(float, _Cutttout)
+            UNITY_DEFINE_INSTANCED_PROP(float4, _CutPlane)
+            UNITY_INSTANCING_BUFFER_END(Props)
+
+            // Register regular properties (apply to every note)
+            float _CutoutEdgeWidth;
+            float _CelSteps;
+            float _CelSmoothness;
+            float _AmbientStrength;
+            float _RimPower;
+            float _RimStrength;
+
+            v2f vert (appdata v)
+            {
+                v2f o;
+                UNITY_INITIALIZE_OUTPUT(v2f, o);
+                UNITY_SETUP_INSTANCE_ID(v);
+                UNITY_TRANSFER_INSTANCE_ID(v, o); // Insert for GPU instancing
+                UNITY_INITIALIZE_VERTEX_OUTPUT_STEREO(o);
+
+                o.vertex = UnityObjectToClipPos(v.vertex);
+                o.localPos = v.vertex;
+                o.worldNormal = UnityObjectToWorldNormal(v.normal);
+
+                return o;
+            }
+
+            fixed4 frag (v2f i) : SV_Target
+            {
+                UNITY_SETUP_INSTANCE_ID(i); // Insert for GPU instancing
+
+                // Cutout works differently depending on if this note is used as debris:
+                // - using debris -> 0 = just hit, 1 = dissolved away
+                // - not using debris (driven by "dissolve") -> 0 = visible, 1 = dissolved
+                float Cutout = UNITY_ACCESS_INSTANCED_PROP(Props, _Cutttout);
+
+                // The color of the note
+                float3 Color = UNITY_ACCESS_INSTANCED_PROP(Props, _Colorrr);
+
+                // This encodes the slice "plane" that the player hit the note through
+                // - (x, y, z) -> plane normal
+                // - (w) -> plane offset along it's normal
+                float4 CutPlane = UNITY_ACCESS_INSTANCED_PROP(Props, _CutPlane);
+
+                // This "c" value will quantify the note's visibility, where negatives are invisible
+                float c = 0;
+
+                #if DEBRIS
+                    // Shift our local position along the slice normal by the cut offset
+                    float3 samplePoint = i.localPos + CutPlane.xyz * CutPlane.w;
+
+                    // Calculate the signed distance of our point to the cut plane
+                    float planeDistance = dot(samplePoint, CutPlane.xyz) / length(CutPlane.xyz);
+
+                    /*
+                    This sets the visibility of our pixel based on it's signed distance to the plane
+                    Negative values (points behind the plane) will not be visible
+                    Cutout acts as an offset to this visibility so that the plane appears to consume the debris
+                    */
+                    c = planeDistance - Cutout * 0.25;
+                #else
+                    // Calculate 3D simplex noise based on the fragment position
+                    float noise = simplex(i.localPos * 2);
+
+                    // Use cutout to lower the values of the noise into the negatives, clipping them
+                    c = noise - Cutout;
+                #endif
+
+                // Negative values of c will discard the pixel
+                clip(c);
+
+                // Positive values of c close to zero will return a border color (white)
+                if (c < _CutoutEdgeWidth) {
+                    return 1;
+                }
+
+                float3 worldNormal = normalize(i.worldNormal);
+
+                // Main directional light direction (works for a directional light in ForwardBase)
+                float3 lightDir = normalize(_WorldSpaceLightPos0.xyz);
+                float3 lightColor = _LightColor0.rgb;
+
+                float NdotL = dot(worldNormal, lightDir);
+
+                float halfBand = 0.5 / _CelSteps;
+                float litFactor = floor(saturate(NdotL) * _CelSteps) / _CelSteps;
+                litFactor = smoothstep(litFactor - _CelSmoothness * halfBand, litFactor + _CelSmoothness * halfBand, saturate(NdotL) - litFactor) * (1.0 / _CelSteps) + litFactor;
+                litFactor = saturate(litFactor);
+                float3 ambient = Color * _AmbientStrength;
+
+                float3 viewDir = normalize(_WorldSpaceCameraPos - mul(unity_ObjectToWorld, float4(i.localPos, 1)).xyz);
+                float rim = 1.0 - saturate(dot(worldNormal, viewDir));
+                rim = pow(rim, _RimPower) * _RimStrength;
+
+                float3 litColor = Color * lightColor * litFactor;
+                float3 finalColor = litColor + ambient + rim * lightColor;
+
+                // Keep the original vertical falloff shading as a subtle multiplier
+                float lighting = pow(i.localPos.y + 0.8, 4);
+
+                return float4(finalColor, 0);
+            }
+            ENDCG
+        }
+    }
+}

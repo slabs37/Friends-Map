@@ -1,0 +1,7 @@
+26 - umbrella acquired
+50 - start mapping
+290 - birb falls
+554 - racket acquired
+568 - birb starts swinging (starting from birb!)
+573.5-584.25-593.75-605.75-616.5-627.25-638-648.75-659.5-670.25-680.5-691.75-702.5-713.25-729.5
+729 - we do big ol' swing and end tennis
